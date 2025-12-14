@@ -59,6 +59,27 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         elif method == 'POST' and action == 'send_message':
             return send_message(body_data, headers)
         
+        elif method == 'GET' and action == 'search_users':
+            query = query_params.get('query', '')
+            return search_users(query, headers)
+        
+        elif method == 'POST' and action == 'add_contact':
+            return add_contact(body_data, headers)
+        
+        elif method == 'GET' and action == 'contacts':
+            user_id = query_params.get('user_id')
+            return get_contacts(user_id, headers)
+        
+        elif method == 'POST' and action == 'start_call':
+            return start_call(body_data, headers)
+        
+        elif method == 'POST' and action == 'end_call':
+            return end_call(body_data, headers)
+        
+        elif method == 'GET' and action == 'call_history':
+            user_id = query_params.get('user_id')
+            return get_call_history(user_id, headers)
+        
         else:
             return {
                 'statusCode': 200,
@@ -288,5 +309,267 @@ def send_message(data: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any
             'time': message_time,
             'status': 'sent'
         }),
+        'isBase64Encoded': False
+    }
+
+def search_users(query: str, headers: Dict[str, str]) -> Dict[str, Any]:
+    if not query or len(query.strip()) < 2:
+        return {
+            'statusCode': 400,
+            'headers': headers,
+            'body': json.dumps({'error': 'Query must be at least 2 characters'}),
+            'isBase64Encoded': False
+        }
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    search_pattern = f'%{query.strip()}%'
+    cur.execute("""
+        SELECT id, username, created_at
+        FROM users
+        WHERE username ILIKE %s
+        ORDER BY username
+        LIMIT 20
+    """, (search_pattern,))
+    
+    users = []
+    for row in cur.fetchall():
+        users.append({
+            'id': row[0],
+            'username': row[1]
+        })
+    
+    cur.close()
+    conn.close()
+    
+    return {
+        'statusCode': 200,
+        'headers': headers,
+        'body': json.dumps({'users': users}),
+        'isBase64Encoded': False
+    }
+
+def add_contact(data: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
+    user_id = data.get('user_id')
+    contact_user_id = data.get('contact_user_id')
+    
+    if not user_id or not contact_user_id:
+        return {
+            'statusCode': 400,
+            'headers': headers,
+            'body': json.dumps({'error': 'user_id and contact_user_id required'}),
+            'isBase64Encoded': False
+        }
+    
+    if user_id == contact_user_id:
+        return {
+            'statusCode': 400,
+            'headers': headers,
+            'body': json.dumps({'error': 'Cannot add yourself as contact'}),
+            'isBase64Encoded': False
+        }
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        INSERT INTO contacts (user_id, contact_user_id)
+        VALUES (%s, %s)
+        ON CONFLICT (user_id, contact_user_id) DO NOTHING
+        RETURNING id
+    """, (user_id, contact_user_id))
+    
+    result = cur.fetchone()
+    
+    cur.execute("""
+        INSERT INTO contacts (user_id, contact_user_id)
+        VALUES (%s, %s)
+        ON CONFLICT (user_id, contact_user_id) DO NOTHING
+    """, (contact_user_id, user_id))
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return {
+        'statusCode': 201,
+        'headers': headers,
+        'body': json.dumps({'success': True, 'message': 'Contact added'}),
+        'isBase64Encoded': False
+    }
+
+def get_contacts(user_id: Optional[str], headers: Dict[str, str]) -> Dict[str, Any]:
+    if not user_id:
+        return {
+            'statusCode': 400,
+            'headers': headers,
+            'body': json.dumps({'error': 'User ID required'}),
+            'isBase64Encoded': False
+        }
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT 
+            u.id,
+            u.username,
+            c.added_at
+        FROM contacts c
+        JOIN users u ON c.contact_user_id = u.id
+        WHERE c.user_id = %s
+        ORDER BY u.username
+    """, (user_id,))
+    
+    contacts = []
+    for row in cur.fetchall():
+        contacts.append({
+            'id': row[0],
+            'username': row[1]
+        })
+    
+    cur.close()
+    conn.close()
+    
+    return {
+        'statusCode': 200,
+        'headers': headers,
+        'body': json.dumps({'contacts': contacts}),
+        'isBase64Encoded': False
+    }
+
+def start_call(data: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
+    caller_id = data.get('caller_id')
+    receiver_id = data.get('receiver_id')
+    call_type = data.get('call_type', 'audio')
+    
+    if not caller_id or not receiver_id:
+        return {
+            'statusCode': 400,
+            'headers': headers,
+            'body': json.dumps({'error': 'caller_id and receiver_id required'}),
+            'isBase64Encoded': False
+        }
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        INSERT INTO calls (caller_id, receiver_id, call_type, status)
+        VALUES (%s, %s, %s, 'calling')
+        RETURNING id
+    """, (caller_id, receiver_id, call_type))
+    
+    call_id = cur.fetchone()[0]
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return {
+        'statusCode': 201,
+        'headers': headers,
+        'body': json.dumps({
+            'call_id': call_id,
+            'status': 'calling'
+        }),
+        'isBase64Encoded': False
+    }
+
+def end_call(data: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
+    call_id = data.get('call_id')
+    status = data.get('status', 'ended')
+    
+    if not call_id:
+        return {
+            'statusCode': 400,
+            'headers': headers,
+            'body': json.dumps({'error': 'call_id required'}),
+            'isBase64Encoded': False
+        }
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        UPDATE calls
+        SET status = %s, ended_at = CURRENT_TIMESTAMP,
+            duration = EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - started_at))
+        WHERE id = %s
+        RETURNING duration
+    """, (status, call_id))
+    
+    result = cur.fetchone()
+    duration = int(result[0]) if result else 0
+    
+    conn.commit()
+    cur.close()
+    conn.close()
+    
+    return {
+        'statusCode': 200,
+        'headers': headers,
+        'body': json.dumps({
+            'success': True,
+            'duration': duration
+        }),
+        'isBase64Encoded': False
+    }
+
+def get_call_history(user_id: Optional[str], headers: Dict[str, str]) -> Dict[str, Any]:
+    if not user_id:
+        return {
+            'statusCode': 400,
+            'headers': headers,
+            'body': json.dumps({'error': 'User ID required'}),
+            'isBase64Encoded': False
+        }
+    
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    cur.execute("""
+        SELECT 
+            c.id,
+            c.call_type,
+            c.status,
+            c.started_at,
+            c.duration,
+            CASE 
+                WHEN c.caller_id = %s THEN u2.username
+                ELSE u1.username
+            END as contact_name,
+            CASE 
+                WHEN c.caller_id = %s THEN 'outgoing'
+                ELSE 'incoming'
+            END as direction
+        FROM calls c
+        JOIN users u1 ON c.caller_id = u1.id
+        JOIN users u2 ON c.receiver_id = u2.id
+        WHERE c.caller_id = %s OR c.receiver_id = %s
+        ORDER BY c.started_at DESC
+        LIMIT 50
+    """, (user_id, user_id, user_id, user_id))
+    
+    calls = []
+    for row in cur.fetchall():
+        calls.append({
+            'id': row[0],
+            'type': row[1],
+            'status': row[2],
+            'time': row[3].strftime('%H:%M') if row[3] else '',
+            'duration': row[4] or 0,
+            'contactName': row[5],
+            'direction': row[6]
+        })
+    
+    cur.close()
+    conn.close()
+    
+    return {
+        'statusCode': 200,
+        'headers': headers,
+        'body': json.dumps({'calls': calls}),
         'isBase64Encoded': False
     }

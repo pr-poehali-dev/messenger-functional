@@ -1,92 +1,54 @@
 import { useState, useEffect } from 'react';
 import AuthScreen from '@/components/AuthScreen';
-import ChatList from '@/components/ChatList';
-import ChatWindow from '@/components/ChatWindow';
-import NewChatDialog from '@/components/NewChatDialog';
-import { loginUser, getUserChats, createChat, getChatMessages, sendMessage, type User, type Chat as ApiChat, type Message as ApiMessage } from '@/lib/api';
+import ContactsList from '@/components/ContactsList';
+import AddContactDialog from '@/components/AddContactDialog';
+import CallWindow from '@/components/CallWindow';
+import { 
+  loginUser, 
+  getContacts, 
+  searchUsers, 
+  addContact, 
+  startCall as apiStartCall,
+  endCall as apiEndCall,
+  type User, 
+  type Contact 
+} from '@/lib/api';
+import { WebRTCCall } from '@/lib/webrtc';
 import { useToast } from '@/hooks/use-toast';
-
-interface Message {
-  id: string;
-  text: string;
-  time: string;
-  isMine: boolean;
-  status?: 'sent' | 'delivered' | 'read';
-}
-
-interface Chat {
-  id: string;
-  name: string;
-  avatar?: string;
-  lastMessage: string;
-  time: string;
-  unread: number;
-  online?: boolean;
-  messages: Message[];
-}
 
 const Index = () => {
   const [user, setUser] = useState<User | null>(null);
-  const [chats, setChats] = useState<Chat[]>([]);
-  const [activeChat, setActiveChat] = useState<string | null>(null);
-  const [newChatOpen, setNewChatOpen] = useState(false);
+  const [contacts, setContacts] = useState<Contact[]>([]);
+  const [addContactOpen, setAddContactOpen] = useState(false);
+  const [activeCall, setActiveCall] = useState<{
+    contactId: number;
+    contactName: string;
+    type: 'audio' | 'video';
+    callId?: number;
+  } | null>(null);
+  const [webrtcCall, setWebrtcCall] = useState<WebRTCCall | null>(null);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [isAudioEnabled, setIsAudioEnabled] = useState(true);
+  const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const { toast } = useToast();
 
   useEffect(() => {
     if (user) {
-      loadChats();
+      loadContacts();
     }
   }, [user]);
 
-  useEffect(() => {
-    if (activeChat && user) {
-      loadMessages(activeChat);
-    }
-  }, [activeChat]);
-
-  const loadChats = async () => {
+  const loadContacts = async () => {
     if (!user) return;
     
     try {
-      const apiChats = await getUserChats(user.id);
-      setChats(apiChats.map(chat => ({
-        ...chat,
-        messages: []
-      })));
+      const contactsList = await getContacts(user.id);
+      setContacts(contactsList);
     } catch (error) {
       toast({
         title: 'Ошибка',
-        description: 'Не удалось загрузить чаты',
-        variant: 'destructive',
-      });
-    }
-  };
-
-  const loadMessages = async (chatId: string) => {
-    if (!user) return;
-    
-    try {
-      const apiMessages = await getChatMessages(chatId);
-      setChats(prev =>
-        prev.map(chat =>
-          chat.id === chatId
-            ? {
-                ...chat,
-                messages: apiMessages.map(msg => ({
-                  id: msg.id,
-                  text: msg.text,
-                  time: msg.time,
-                  isMine: msg.userId === user.id,
-                  status: msg.status,
-                }))
-              }
-            : chat
-        )
-      );
-    } catch (error) {
-      toast({
-        title: 'Ошибка',
-        description: 'Не удалось загрузить сообщения',
+        description: 'Не удалось загрузить контакты',
         variant: 'destructive',
       });
     }
@@ -109,85 +71,114 @@ const Index = () => {
     }
   };
 
-  const handleSendMessage = async (text: string) => {
-    if (!activeChat || !user) return;
-
-    const tempId = `temp${Date.now()}`;
-    const tempMessage: Message = {
-      id: tempId,
-      text,
-      time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
-      isMine: true,
-      status: 'sent',
-    };
-
-    setChats(prev =>
-      prev.map(chat =>
-        chat.id === activeChat
-          ? {
-              ...chat,
-              messages: [...chat.messages, tempMessage],
-              lastMessage: text,
-              time: tempMessage.time,
-            }
-          : chat
-      )
-    );
-
+  const handleSearchUsers = async (query: string): Promise<Contact[]> => {
     try {
-      const sentMessage = await sendMessage(activeChat, user.id, text);
-      
-      setChats(prev =>
-        prev.map(chat =>
-          chat.id === activeChat
-            ? {
-                ...chat,
-                messages: chat.messages.map(msg =>
-                  msg.id === tempId
-                    ? { ...msg, id: sentMessage.id }
-                    : msg
-                ),
-              }
-            : chat
-        )
-      );
+      return await searchUsers(query);
     } catch (error) {
       toast({
         title: 'Ошибка',
-        description: 'Не удалось отправить сообщение',
+        description: 'Не удалось найти пользователей',
+        variant: 'destructive',
+      });
+      return [];
+    }
+  };
+
+  const handleAddContact = async (contactId: number) => {
+    if (!user) return;
+    
+    try {
+      await addContact(user.id, contactId);
+      await loadContacts();
+      toast({
+        title: 'Контакт добавлен',
+        description: 'Пользователь добавлен в ваши контакты',
+      });
+    } catch (error) {
+      toast({
+        title: 'Ошибка',
+        description: 'Не удалось добавить контакт',
         variant: 'destructive',
       });
     }
   };
 
-  const handleCreateChat = async (name: string, type: 'personal' | 'group') => {
+  const handleStartCall = async (contactId: number, type: 'audio' | 'video') => {
     if (!user) return;
 
+    const contact = contacts.find(c => c.id === contactId);
+    if (!contact) return;
+
     try {
-      const newChat = await createChat(name, user.id, type);
+      const callData = await apiStartCall(user.id, contactId, type);
       
-      setChats(prev => [{
-        id: newChat.id,
-        name: newChat.name,
-        lastMessage: 'Новый чат',
-        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
-        unread: 0,
-        online: false,
-        messages: [],
-      }, ...prev]);
+      const call = new WebRTCCall();
+      const stream = await call.startCall(type === 'video');
       
-      setActiveChat(newChat.id);
-      
+      setWebrtcCall(call);
+      setLocalStream(stream);
+      setActiveCall({
+        contactId,
+        contactName: contact.username,
+        type,
+        callId: callData.call_id,
+      });
+
+      call.onRemoteStream((remoteStream) => {
+        setRemoteStream(remoteStream);
+      });
+
+      call.onCallEnd(() => {
+        handleEndCall();
+      });
+
       toast({
-        title: 'Чат создан',
-        description: `Чат "${name}" успешно создан`,
+        title: 'Звонок начат',
+        description: `Звоним ${contact.username}...`,
       });
     } catch (error) {
       toast({
         title: 'Ошибка',
-        description: 'Не удалось создать чат',
+        description: 'Не удалось начать звонок',
         variant: 'destructive',
       });
+    }
+  };
+
+  const handleEndCall = async () => {
+    if (activeCall?.callId) {
+      try {
+        await apiEndCall(activeCall.callId);
+      } catch (error) {
+        console.error('Failed to end call on server:', error);
+      }
+    }
+
+    if (webrtcCall) {
+      webrtcCall.endCall();
+      setWebrtcCall(null);
+    }
+
+    setLocalStream(null);
+    setRemoteStream(null);
+    setActiveCall(null);
+    setIsAudioEnabled(true);
+    setIsVideoEnabled(true);
+  };
+
+  const handleToggleAudio = () => {
+    if (webrtcCall) {
+      const newState = !isAudioEnabled;
+      webrtcCall.toggleAudio(newState);
+      setIsAudioEnabled(newState);
+    }
+  };
+
+  const handleToggleVideo = () => {
+    if (webrtcCall) {
+      const newState = !isVideoEnabled;
+      webrtcCall.toggleVideo(newState);
+      setIsVideoEnabled(newState);
     }
   };
 
@@ -195,34 +186,51 @@ const Index = () => {
     return <AuthScreen onLogin={handleLogin} />;
   }
 
-  const currentChat = chats.find(chat => chat.id === activeChat);
-
   return (
-    <div className="h-screen flex overflow-hidden">
-      <div className="w-full md:w-96 flex-shrink-0">
-        <ChatList
-          chats={chats}
-          activeChat={activeChat}
-          onChatSelect={setActiveChat}
-          onNewChat={() => setNewChatOpen(true)}
-        />
+    <>
+      <div className="h-screen flex overflow-hidden">
+        <div className="w-full md:w-96 flex-shrink-0">
+          <ContactsList
+            contacts={contacts}
+            onCall={handleStartCall}
+            onAddContact={() => setAddContactOpen(true)}
+          />
+        </div>
+
+        <div className="flex-1 flex items-center justify-center bg-background">
+          <div className="text-center">
+            <div className="mb-4 bg-gradient-to-br from-primary to-secondary p-6 rounded-full inline-block">
+              <svg className="w-16 h-16 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" />
+              </svg>
+            </div>
+            <h2 className="text-2xl font-bold mb-2">Выберите контакт</h2>
+            <p className="text-muted-foreground">Позвоните друзьям или добавьте новые контакты</p>
+          </div>
+        </div>
       </div>
 
-      <ChatWindow
-        chatId={activeChat}
-        chatName={currentChat?.name || ''}
-        chatAvatar={currentChat?.avatar}
-        online={currentChat?.online}
-        messages={currentChat?.messages || []}
-        onSendMessage={handleSendMessage}
+      <AddContactDialog
+        open={addContactOpen}
+        onClose={() => setAddContactOpen(false)}
+        onSearch={handleSearchUsers}
+        onAdd={handleAddContact}
       />
 
-      <NewChatDialog
-        open={newChatOpen}
-        onClose={() => setNewChatOpen(false)}
-        onCreateChat={handleCreateChat}
-      />
-    </div>
+      {activeCall && (
+        <CallWindow
+          contactName={activeCall.contactName}
+          callType={activeCall.type}
+          onDecline={handleEndCall}
+          localStream={localStream}
+          remoteStream={remoteStream}
+          onToggleAudio={handleToggleAudio}
+          onToggleVideo={handleToggleVideo}
+          isAudioEnabled={isAudioEnabled}
+          isVideoEnabled={isVideoEnabled}
+        />
+      )}
+    </>
   );
 };
 
