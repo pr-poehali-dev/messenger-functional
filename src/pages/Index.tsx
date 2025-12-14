@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import AuthScreen from '@/components/AuthScreen';
 import ChatList from '@/components/ChatList';
 import ChatWindow from '@/components/ChatWindow';
 import NewChatDialog from '@/components/NewChatDialog';
+import { loginUser, getUserChats, createChat, getChatMessages, sendMessage, type User, type Chat as ApiChat, type Message as ApiMessage } from '@/lib/api';
+import { useToast } from '@/hooks/use-toast';
 
 interface Message {
   id: string;
@@ -23,60 +25,96 @@ interface Chat {
   messages: Message[];
 }
 
-const initialChats: Chat[] = [
-  {
-    id: '1',
-    name: 'Анна Иванова',
-    lastMessage: 'Привет! Как дела?',
-    time: '14:23',
-    unread: 2,
-    online: true,
-    messages: [
-      { id: 'm1', text: 'Привет! Как дела?', time: '14:23', isMine: false, status: 'read' },
-      { id: 'm2', text: 'Привет! Всё отлично, спасибо! А у тебя?', time: '14:24', isMine: true, status: 'read' },
-    ],
-  },
-  {
-    id: '2',
-    name: 'Команда проекта',
-    lastMessage: 'Встреча в 15:00',
-    time: '13:45',
-    unread: 0,
-    online: false,
-    messages: [
-      { id: 'm3', text: 'Всем привет!', time: '13:40', isMine: false },
-      { id: 'm4', text: 'Встреча в 15:00', time: '13:45', isMine: false },
-    ],
-  },
-  {
-    id: '3',
-    name: 'Максим Петров',
-    lastMessage: 'Отправил файлы',
-    time: '12:30',
-    unread: 0,
-    online: true,
-    messages: [
-      { id: 'm5', text: 'Отправил файлы', time: '12:30', isMine: false },
-      { id: 'm6', text: 'Спасибо, получил!', time: '12:31', isMine: true, status: 'read' },
-    ],
-  },
-];
-
 const Index = () => {
-  const [user, setUser] = useState<string | null>(null);
-  const [chats, setChats] = useState<Chat[]>(initialChats);
+  const [user, setUser] = useState<User | null>(null);
+  const [chats, setChats] = useState<Chat[]>([]);
   const [activeChat, setActiveChat] = useState<string | null>(null);
   const [newChatOpen, setNewChatOpen] = useState(false);
+  const { toast } = useToast();
 
-  const handleLogin = (username: string) => {
-    setUser(username);
+  useEffect(() => {
+    if (user) {
+      loadChats();
+    }
+  }, [user]);
+
+  useEffect(() => {
+    if (activeChat && user) {
+      loadMessages(activeChat);
+    }
+  }, [activeChat]);
+
+  const loadChats = async () => {
+    if (!user) return;
+    
+    try {
+      const apiChats = await getUserChats(user.id);
+      setChats(apiChats.map(chat => ({
+        ...chat,
+        messages: []
+      })));
+    } catch (error) {
+      toast({
+        title: 'Ошибка',
+        description: 'Не удалось загрузить чаты',
+        variant: 'destructive',
+      });
+    }
   };
 
-  const handleSendMessage = (text: string) => {
-    if (!activeChat) return;
+  const loadMessages = async (chatId: string) => {
+    if (!user) return;
+    
+    try {
+      const apiMessages = await getChatMessages(chatId);
+      setChats(prev =>
+        prev.map(chat =>
+          chat.id === chatId
+            ? {
+                ...chat,
+                messages: apiMessages.map(msg => ({
+                  id: msg.id,
+                  text: msg.text,
+                  time: msg.time,
+                  isMine: msg.userId === user.id,
+                  status: msg.status,
+                }))
+              }
+            : chat
+        )
+      );
+    } catch (error) {
+      toast({
+        title: 'Ошибка',
+        description: 'Не удалось загрузить сообщения',
+        variant: 'destructive',
+      });
+    }
+  };
 
-    const newMessage: Message = {
-      id: `m${Date.now()}`,
+  const handleLogin = async (username: string) => {
+    try {
+      const loggedUser = await loginUser(username);
+      setUser(loggedUser);
+      toast({
+        title: 'Добро пожаловать!',
+        description: `Вы вошли как ${loggedUser.username}`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Ошибка',
+        description: 'Не удалось войти',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const handleSendMessage = async (text: string) => {
+    if (!activeChat || !user) return;
+
+    const tempId = `temp${Date.now()}`;
+    const tempMessage: Message = {
+      id: tempId,
       text,
       time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
       isMine: true,
@@ -88,59 +126,69 @@ const Index = () => {
         chat.id === activeChat
           ? {
               ...chat,
-              messages: [...chat.messages, newMessage],
+              messages: [...chat.messages, tempMessage],
               lastMessage: text,
-              time: newMessage.time,
+              time: tempMessage.time,
             }
           : chat
       )
     );
 
-    setTimeout(() => {
-      const responses = [
-        'Понял, спасибо!',
-        'Хорошо, договорились',
-        'Отлично!',
-        'Без проблем',
-        'Окей 👍',
-      ];
-      const response = responses[Math.floor(Math.random() * responses.length)];
+    try {
+      const sentMessage = await sendMessage(activeChat, user.id, text);
       
-      const responseMessage: Message = {
-        id: `m${Date.now()}`,
-        text: response,
-        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
-        isMine: false,
-      };
-
       setChats(prev =>
         prev.map(chat =>
           chat.id === activeChat
             ? {
                 ...chat,
-                messages: [...chat.messages, responseMessage],
-                lastMessage: response,
-                time: responseMessage.time,
+                messages: chat.messages.map(msg =>
+                  msg.id === tempId
+                    ? { ...msg, id: sentMessage.id }
+                    : msg
+                ),
               }
             : chat
         )
       );
-    }, 1000 + Math.random() * 2000);
+    } catch (error) {
+      toast({
+        title: 'Ошибка',
+        description: 'Не удалось отправить сообщение',
+        variant: 'destructive',
+      });
+    }
   };
 
-  const handleCreateChat = (name: string) => {
-    const newChat: Chat = {
-      id: `c${Date.now()}`,
-      name,
-      lastMessage: 'Новый чат',
-      time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
-      unread: 0,
-      online: false,
-      messages: [],
-    };
+  const handleCreateChat = async (name: string, type: 'personal' | 'group') => {
+    if (!user) return;
 
-    setChats(prev => [newChat, ...prev]);
-    setActiveChat(newChat.id);
+    try {
+      const newChat = await createChat(name, user.id, type);
+      
+      setChats(prev => [{
+        id: newChat.id,
+        name: newChat.name,
+        lastMessage: 'Новый чат',
+        time: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+        unread: 0,
+        online: false,
+        messages: [],
+      }, ...prev]);
+      
+      setActiveChat(newChat.id);
+      
+      toast({
+        title: 'Чат создан',
+        description: `Чат "${name}" успешно создан`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Ошибка',
+        description: 'Не удалось создать чат',
+        variant: 'destructive',
+      });
+    }
   };
 
   if (!user) {
